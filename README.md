@@ -114,9 +114,9 @@ Frontend hiện chưa khai báo base URL của API; cần cấu hình URL backen
 | JWT và refresh token | Chưa triển khai |
 | S3 và CloudFront | Chưa triển khai service/cấu hình |
 
-## Lưu ý bảo mật
+<!-- ## Lưu ý bảo mật
 
 - Không commit secret, access key, connection string hoặc file môi trường.
 - Dùng biến môi trường hoặc secret manager cho cấu hình nhạy cảm.
 - Presigned URL nên có thời hạn ngắn và giới hạn loại tệp, kích thước cùng quyền sở hữu.
-- Cấu hình CORS phù hợp khi frontend và backend chạy ở các origin khác nhau.
+- Cấu hình CORS phù hợp khi frontend và backend chạy ở các origin khác nhau. -->
