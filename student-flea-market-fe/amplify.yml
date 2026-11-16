@@ -1,0 +1,43 @@
+# AWS Amplify Hosting - Next.js static export (output: 'export' -> out/)
+#
+# Amplify Console setup:
+#   - App root: repo root (repo nay chi chua frontend).
+#   - Framework: de Amplify nhan "Next.js - SSG" / hosting tinh (KHONG chon SSR/WEB_COMPUTE).
+#   - Environment variables (bat buoc, gan vao bundle LUC BUILD):
+#       NEXT_PUBLIC_API_URL = https://<api-id>.execute-api.ap-southeast-1.amazonaws.com/api
+#     Doi gia tri -> phai "Redeploy this version".
+#   - Rewrites and redirects: ap dung amplify-rules.json (lenh trong DEPLOYMENT.md).
+#     Thieu buoc nay, mo truc tiep /marketplace hoac F5 se bi 404.
+#   - Custom headers: Amplify doc tu customHttp.yml.
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - nvm install 22 && nvm use 22
+        - node --version && npm --version
+        - |
+          if [ -z "$NEXT_PUBLIC_API_URL" ]; then
+            echo "ERROR: NEXT_PUBLIC_API_URL chua duoc dat trong Amplify Environment variables." >&2
+            exit 1
+          fi
+          case "$NEXT_PUBLIC_API_URL" in
+            https://*) ;;
+            *) echo "ERROR: NEXT_PUBLIC_API_URL phai la HTTPS (hien tai: $NEXT_PUBLIC_API_URL)." >&2; exit 1 ;;
+          esac
+        - npm ci --no-audit --no-fund
+    build:
+      commands:
+        - echo "Building with NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL"
+        - npm run lint
+        - npm run typecheck
+        - npm run build
+        - test -f out/index.html
+  artifacts:
+    baseDirectory: out
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
+      - .next/cache/**/*
