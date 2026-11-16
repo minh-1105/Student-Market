@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Student Market API - ASP.NET Core (.NET 8) on Lambda behind an API Gateway HTTP API.
+  Deploy media-pipeline.yaml first and pass its outputs (MediaBucketName, CloudFrontBaseUrl).
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  DbConnectionString:
+    Type: String
+    NoEcho: true
+    Description: Npgsql connection string, e.g. Host=...;Port=5432;Database=...;Username=...;Password=...;SSL Mode=Require
+  JwtSecretKey:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    Description: Random secret (>= 32 chars, 64 recommended) used to sign JWTs.
+  MediaBucketName:
+    Type: String
+    Description: Output MediaBucketName of the media-pipeline stack.
+  CloudFrontBaseUrl:
+    Type: String
+    Description: Output CloudFrontBaseUrl of the media-pipeline stack (https://...).
+  FrontendOrigins:
+    Type: String
+    Default: http://localhost:3000,http://localhost:5173
+    Description: Comma-separated browser origins allowed by API CORS. Use HTTPS origins outside dev.
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: Private subnets that can reach RDS. Leave empty when the database is publicly reachable.
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: Security groups for the API Lambda (required when SubnetIds is set).
+  SkipDatabaseSeed:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: "'false' applies pending EF migrations and seeds admin/categories on cold start. Keep 'true' with Supabase (migrate manually via session pooler)."
+  LambdaLogRetentionDays:
+    Type: Number
+    Default: 14
+  EmailUsername:
+    Type: String
+    Default: ''
+    Description: SMTP login (Gmail address). Leave empty to only log emails (OTP) to CloudWatch.
+  EmailPassword:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: SMTP password (Gmail App Password, not the account password).
+  EmailFromEmail:
+    Type: String
+    Default: no-reply@studentfleamarket.local
+    Description: Sender address. A *.local placeholder makes the app send as EmailUsername (Gmail rejects other senders).
+  EmailLogOnly:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: "'true' logs emails instead of sending. Forced to 'true' when EmailUsername is empty."
+  EmailSmtpHost:
+    Type: String
+    Default: smtp.gmail.com
+  EmailSmtpPort:
+    Type: Number
+    Default: 587
+
+Conditions:
+  UseVpc: !Not [!Equals [!Join ['', !Ref SubnetIds], '']]
+  HasSmtpCredentials: !Not [!Equals [!Ref EmailUsername, '']]
+
+Globals:
+  Function:
+    Runtime: dotnet8
+    Architectures: [x86_64]
+
+Resources:
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ApiLogGroup
+    Metadata:
+      BuildMethod: dotnet8
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-api'
+      CodeUri: ../../student-flea-market-be/StudentFleaMarket.API/
+      # Executable-assembly hosting (AddAWSLambdaHosting): handler is the assembly name.
+      Handler: StudentFleaMarket.API
+      MemorySize: 1024
+      # HTTP API integration timeout is 30s.
+      Timeout: 30
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+      VpcConfig: !If
+        - UseVpc
+        - SubnetIds: !Ref SubnetIds
+          SecurityGroupIds: !Ref SecurityGroupIds
+        - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          ASPNETCORE_ENVIRONMENT: Production
+          ConnectionStrings__DefaultConnection: !Ref DbConnectionString
+          Jwt__SecretKey: !Ref JwtSecretKey
+          MediaStorage__BucketName: !Ref MediaBucketName
+          MediaStorage__Region: !Ref AWS::Region
+          MediaStorage__ServiceUrl: ''
+          MediaStorage__ForcePathStyle: 'false'
+          MediaStorage__CloudFrontBaseUrl: !Ref CloudFrontBaseUrl
+          Cors__AllowedOrigins: !Ref FrontendOrigins
+          SkipDatabaseSeed: !Ref SkipDatabaseSeed
+          SkipDemoDataSeed: 'true'
+          # appsettings.json defaults Email:LogOnly=true; without these the OTP only reaches CloudWatch.
+          Email__Host: !Ref EmailSmtpHost
+          Email__Port: !Ref EmailSmtpPort
+          Email__UseSsl: 'true'
+          Email__Username: !Ref EmailUsername
+          Email__Password: !Ref EmailPassword
+          Email__FromEmail: !Ref EmailFromEmail
+          Email__LogOnly: !If [HasSmtpCredentials, !Ref EmailLogOnly, 'true']
+          # Surface SMTP failures as errors instead of silently logging the OTP.
+          Email__LogOnFailure: 'false'
+      Policies:
+        # Needed only to create ENIs when attached to a VPC; harmless otherwise.
+        - AWSLambdaVPCAccessExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Sid: CreatePresignedRawImageUploads
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${MediaBucketName}/raw/*'
+            # HeadObject when confirming an upload before saving ItemImage.
+            - Sid: VerifyRawImageUploads
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub 'arn:${AWS::Partition}:s3:::${MediaBucketName}/raw/*'
+      Events:
+        Proxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: ANY
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      # CORS is handled by the ASP.NET Core app (Cors__AllowedOrigins).
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-api'
+      RetentionInDays: !Ref LambdaLogRetentionDays
+
+  ApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Lambda reported errors in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ApiFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the frontend (VITE_API_URL / NEXT_PUBLIC_API_URL).
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
+  ApiFunctionName:
+    Value: !Ref ApiFunction

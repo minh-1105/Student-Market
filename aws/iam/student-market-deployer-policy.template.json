@@ -1,0 +1,279 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAccountIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageProjectLambda",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:DeleteFunction",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:PutFunctionConcurrency",
+        "lambda:DeleteFunctionConcurrency",
+        "lambda:TagResource",
+        "lambda:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:lambda:ap-southeast-1:ACCOUNT_ID:function:student-market-dev-api",
+        "arn:aws:lambda:ap-southeast-1:ACCOUNT_ID:function:student-market-dev-image-processor"
+      ]
+    },
+    {
+      "Sid": "ReadLambdaInventory",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:ListFunctions",
+        "lambda:ListTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "ManageProjectHttpApis",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:POST",
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:DELETE"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:ap-southeast-1::/apis",
+        "arn:aws:apigateway:ap-southeast-1::/apis/*"
+      ]
+    },
+    {
+      "Sid": "ManageProjectLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:DescribeLogStreams",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteRetentionPolicy",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents",
+        "logs:TagResource",
+        "logs:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:logs:ap-southeast-1:ACCOUNT_ID:log-group:/aws/lambda/student-market-dev-api",
+        "arn:aws:logs:ap-southeast-1:ACCOUNT_ID:log-group:/aws/lambda/student-market-dev-api:*",
+        "arn:aws:logs:ap-southeast-1:ACCOUNT_ID:log-group:/aws/lambda/student-market-dev-image-processor",
+        "arn:aws:logs:ap-southeast-1:ACCOUNT_ID:log-group:/aws/lambda/student-market-dev-image-processor:*"
+      ]
+    },
+    {
+      "Sid": "ReadLogGroupInventory",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "InspectVpcResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeVpcEndpoints"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "ManageDevNetworkResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:CreateVpcEndpoint",
+        "ec2:ModifyVpcEndpoint",
+        "ec2:DeleteVpcEndpoints"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "ManageProjectRdsResources",
+      "Effect": "Allow",
+      "Action": [
+        "rds:AddTagsToResource",
+        "rds:CreateDBInstance",
+        "rds:CreateDBSnapshot",
+        "rds:DeleteDBInstance",
+        "rds:DescribeDBInstances",
+        "rds:ModifyDBInstance",
+        "rds:CreateDBSubnetGroup",
+        "rds:DeleteDBSubnetGroup",
+        "rds:DescribeDBSubnetGroups",
+        "rds:ModifyDBSubnetGroup",
+        "rds:DescribeOrderableDBInstanceOptions",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:rds:ap-southeast-1:ACCOUNT_ID:db:student-market-dev-postgres",
+        "arn:aws:rds:ap-southeast-1:ACCOUNT_ID:subgrp:student-market-dev-db-subnets",
+        "arn:aws:rds:ap-southeast-1:ACCOUNT_ID:snapshot:student-market-dev-*"
+      ]
+    },
+    {
+      "Sid": "AllowRdsDiscoveryCallsWithoutResourceScope",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBSubnetGroups",
+        "rds:DescribeOrderableDBInstanceOptions"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "ManageLambdaExecutionRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:ListRolePolicies"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/student-market-dev-api-role",
+        "arn:aws:iam::ACCOUNT_ID:role/student-market-dev-image-processor-role"
+      ]
+    },
+    {
+      "Sid": "PassOnlyProjectRoleToLambda",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/student-market-dev-api-role",
+        "arn:aws:iam::ACCOUNT_ID:role/student-market-dev-image-processor-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "lambda.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "CreateRdsServiceLinkedRoleIfMissing",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "rds.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "CreateAndListAmplifyApps",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:CreateApp",
+        "amplify:ListApps"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-southeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "ManageAmplifyDevApps",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:GetApp",
+        "amplify:UpdateApp",
+        "amplify:DeleteApp",
+        "amplify:ListBranches",
+        "amplify:ListWebHooks",
+        "amplify:TagResource",
+        "amplify:UntagResource"
+      ],
+      "Resource": "arn:aws:amplify:ap-southeast-1:ACCOUNT_ID:apps/*"
+    },
+    {
+      "Sid": "ManageAmplifyDevBranches",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:CreateBranch",
+        "amplify:GetBranch",
+        "amplify:UpdateBranch",
+        "amplify:DeleteBranch",
+        "amplify:ListJobs",
+        "amplify:CreateWebHook",
+        "amplify:TagResource",
+        "amplify:UntagResource"
+      ],
+      "Resource": "arn:aws:amplify:ap-southeast-1:ACCOUNT_ID:apps/*/branches/*"
+    },
+    {
+      "Sid": "ManageAmplifyDevJobs",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:StartJob",
+        "amplify:GetJob",
+        "amplify:StopJob"
+      ],
+      "Resource": "arn:aws:amplify:ap-southeast-1:ACCOUNT_ID:apps/*/branches/*/jobs/*"
+    },
+    {
+      "Sid": "ManageAmplifyDevWebHooks",
+      "Effect": "Allow",
+      "Action": [
+        "amplify:GetWebHook",
+        "amplify:DeleteWebHook",
+        "amplify:TagResource",
+        "amplify:UntagResource"
+      ],
+      "Resource": "arn:aws:amplify:ap-southeast-1:ACCOUNT_ID:webhooks/*"
+    }
+  ]
+}

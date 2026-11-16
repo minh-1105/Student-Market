@@ -526,3 +526,19 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+# Generated AWS IAM policies contain real account and resource identifiers.
+aws/iam/*.generated.json
+
+# Local AWS/SAM build artifacts
+/.localstack/
+/.aws-sam/
+
+# Production folder: deploy scripts, connection strings, secrets (local only)
+/Production/
+
+# Credentials and local backups (never commit)
+account.txt
+*.zip
+
+# Third-party LocalStack source clone (has its own .git), not project code
+/localstack/

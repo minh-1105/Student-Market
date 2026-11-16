@@ -1,0 +1,28 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: student-market-localstack
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      - SERVICES=s3,lambda,iam,logs,sts
+      - AWS_DEFAULT_REGION=ap-southeast-1
+      - PERSISTENCE=1
+      - LAMBDA_DOCKER_NETWORK=student-market-localstack-network
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN:?Set LOCALSTACK_AUTH_TOKEN or create .env.localstack}
+      - EXTRA_CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost.localstack.cloud:4566,https://app.localstack.cloud
+      - EXTRA_CORS_ALLOWED_HEADERS=authorization,content-type,x-amz-date,x-amz-security-token,x-amz-target,x-amz-user-agent
+      - EXTRA_CORS_EXPOSE_HEADERS=etag,content-length,content-type,x-amz-request-id
+    volumes:
+      - student-market-localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - student-market-localstack-network
+
+volumes:
+  student-market-localstack-data:
+    name: student-market-localstack-data
+
+networks:
+  student-market-localstack-network:
+    name: student-market-localstack-network

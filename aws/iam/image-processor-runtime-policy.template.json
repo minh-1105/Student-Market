@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CreateImageProcessorLogGroup",
+      "Effect": "Allow",
+      "Action": "logs:CreateLogGroup",
+      "Resource": "arn:aws:logs:ap-southeast-1:ACCOUNT_ID:*"
+    },
+    {
+      "Sid": "WriteImageProcessorLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:ap-southeast-1:ACCOUNT_ID:log-group:/aws/lambda/student-market-dev-image-processor:*"
+    },
+    {
+      "Sid": "ReadOnlyRawImages",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::IMAGE_BUCKET_NAME/raw/*"
+    },
+    {
+      "Sid": "WriteOnlyProcessedImages",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::IMAGE_BUCKET_NAME/processed/*"
+    }
+  ]
+}

@@ -1,0 +1,581 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Student Market image pipeline - keeps raw uploads private, processes them with an
+  S3-triggered Lambda, and serves only processed images through CloudFront OAC
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: browser -> presigned POST -> private S3 raw/ -> Lambda -> processed/ -> CloudFront OAC
+    must:
+      - raw/ never public or readable through CloudFront
+      - S3 event filter stays raw/ to prevent processor recursion
+      - runtime roles use prefix-scoped S3 permissions
+    ref:
+      - at: aws/iac/README.md
+        has: build, validation, parameters, cost controls
+        scope: companion
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  FrontendOrigins:
+    Type: CommaDelimitedList
+    Default: http://localhost:3000,http://localhost:5173
+    Description: Exact browser origins allowed to submit presigned POST uploads.
+  LambdaLogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+  ProcessorReservedConcurrency:
+    Type: Number
+    # 0 = do not reserve. New accounts have a Lambda concurrency quota of 10 and AWS keeps
+    # at least 10 unreserved, so any reservation fails until the quota is raised (aws.md 5.3).
+    Default: 0
+    MinValue: 0
+    MaxValue: 100
+  AbortIncompleteMultipartDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+  NoncurrentVersionRetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 3650
+  EnableAuditLogging:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enables S3 server access logs and CloudTrail S3 data events; both add cost.
+  EnableDetailedS3Metrics:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enables paid S3 request metrics for the whole media bucket.
+
+Conditions:
+  AuditLoggingEnabled: !Equals [!Ref EnableAuditLogging, 'true']
+  DetailedS3MetricsEnabled: !Equals [!Ref EnableDetailedS3Metrics, 'true']
+  ReserveProcessorConcurrency: !Not [!Equals [!Ref ProcessorReservedConcurrency, '0']]
+
+Resources:
+  AuditLogBucket:
+    Type: AWS::S3::Bucket
+    Condition: AuditLoggingEnabled
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: optional encrypted destination for S3 access logs & CloudTrail data events; conditional to control dev cost
+        must:
+          - block all public access
+          - retain independently of stack deletion for audit continuity
+        mutable: change-with-constraints
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-audit-logs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: StudentMarket
+        - Key: Environment
+          Value: !Ref Environment
+
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: private system of record for raw uploads & processed variants; one bucket keeps event and prefix policy coupling explicit
+        must:
+          - BucketOwnerEnforced; no ACLs
+          - Block Public Access remains fully enabled
+          - notification prefix remains raw/
+          - do not add raw expiry until product retention is approved
+        mutable: change-with-constraints
+        mutability:
+          VersioningConfiguration: review-required
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [POST]
+            AllowedOrigins: !Ref FrontendOrigins
+            ExposedHeaders: [ETag]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: !Ref AbortIncompleteMultipartDays
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref NoncurrentVersionRetentionDays
+      LoggingConfiguration: !If
+        - AuditLoggingEnabled
+        - DestinationBucketName: !Ref AuditLogBucket
+          LogFilePrefix: s3-access/media/
+        - !Ref AWS::NoValue
+      MetricsConfigurations: !If
+        - DetailedS3MetricsEnabled
+        - - Id: EntireBucket
+        - !Ref AWS::NoValue
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: StudentMarket
+        - Key: Environment
+          Value: !Ref Environment
+
+  ImageProcessorRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: isolated runtime identity for image transformation; inline policy avoids broad managed policies
+        must:
+          - read only MediaBucket/raw/*
+          - write only MediaBucket/processed/*
+          - no bucket listing or delete permissions
+        mutable: change-with-constraints
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: image-processor-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-image-processor:*'
+              - Sid: SendFailedEventsToDlq
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ImageProcessorFailureQueue.Arn
+
+  ImageProcessorS3Policy:
+    Type: AWS::IAM::Policy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: separate attachment breaks S3-notification creation cycle while preserving prefix-scoped runtime access
+        must:
+          - read only MediaBucket/raw/*
+          - write only MediaBucket/processed/*
+          - no bucket listing or delete permissions
+        mutable: change-with-constraints
+    Properties:
+      PolicyName: image-processor-s3
+      Roles:
+        - !Ref ImageProcessorRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadRawImages
+            Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub '${MediaBucket.Arn}/raw/*'
+          - Sid: WriteProcessedImages
+            Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub '${MediaBucket.Arn}/processed/*'
+
+  ImageProcessorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ImageProcessorLogGroup
+    Metadata:
+      BuildMethod: dotnet8
+      com.aws.cloudformation.Context:
+        why: on-demand Event Function fits bursty object-created work & scales to zero; fixed output keys make at-least-once delivery idempotent
+        must:
+          - handler validates magic bytes, MIME, source bytes & pixel count before writing
+          - output keys stay processed/items/{itemId}/{uploadId}/{variant}.webp
+          - no VPC attachment; function only needs S3 & CloudWatch APIs
+        mutable: change-with-constraints
+        mutability:
+          Runtime: review-required
+          Handler: must-never-change
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-image-processor'
+      CodeUri: ../../student-flea-market-be/StudentFleaMarket.ImageProcessor/
+      Handler: StudentFleaMarket.ImageProcessor::StudentFleaMarket.ImageProcessor.Function::FunctionHandler
+      Runtime: dotnet8
+      Architectures: [x86_64]
+      Role: !GetAtt ImageProcessorRole.Arn
+      MemorySize: 1024
+      Timeout: 60
+      EphemeralStorage:
+        Size: 512
+      ReservedConcurrentExecutions: !If [ReserveProcessorConcurrency, !Ref ProcessorReservedConcurrency, !Ref AWS::NoValue]
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+      Environment:
+        Variables:
+          MAX_SOURCE_BYTES: '10485760'
+          MAX_PIXELS: '40000000'
+          LARGE_MAX_WIDTH: '1600'
+          THUMBNAIL_MAX_WIDTH: '480'
+          WEBP_QUALITY: '82'
+      Events:
+        RawImageCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref MediaBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw/
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 3600
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt ImageProcessorFailureQueue.Arn
+
+  ImageProcessorFailureQueue:
+    Type: AWS::SQS::Queue
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: retains S3 events that still fail after bounded Lambda async retries for investigation & replay
+        must:
+          - encrypted at rest
+          - alarm when any message is visible
+          - deny non-TLS access
+        mutable: change-with-constraints
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Project
+          Value: StudentMarket
+        - Key: Environment
+          Value: !Ref Environment
+
+  ImageProcessorFailureQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ImageProcessorFailureQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: sqs:*
+            Resource: !GetAtt ImageProcessorFailureQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  ImageProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: bounded Lambda logs prevent indefinite storage cost while retaining operational evidence
+        must:
+          - application logs never include JWT, credentials, object bodies, or presigned URLs
+        mutable: free-to-tune
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-image-processor'
+      RetentionInDays: !Ref LambdaLogRetentionDays
+
+  ImageProcessorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Image processor reported one or more errors in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ImageProcessorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  ImageProcessorThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Image processor was throttled in five minutes.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ImageProcessorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  ImageProcessorDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Image processor p99 duration exceeded 80 percent of its timeout.
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ImageProcessorFunction
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 48000
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  ImageProcessorDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Image processor failure queue contains one or more events.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ImageProcessorFailureQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  MediaOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: SigV4 access from CloudFront to private S3 REST origin; replaces legacy OAI
+        must:
+          - signing behavior stays always
+          - origin type stays s3
+        mutable: change-with-constraints
+    Properties:
+      OriginAccessControlConfig:
+        Description: !Sub 'Private access to processed Student Market images (${Environment})'
+        Name: !Sub '${AWS::StackName}-media-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  MediaDistribution:
+    Type: AWS::CloudFront::Distribution
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: HTTPS CDN for immutable WebP variants; bucket policy denies this distribution access outside processed/
+        must:
+          - viewer protocol redirects to HTTPS
+          - OAC is attached to the S3 REST origin
+          - direct raw/ reads remain denied by bucket policy
+        mutable: change-with-constraints
+    Properties:
+      DistributionConfig:
+        Comment: !Sub 'Student Market processed images (${Environment})'
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        Origins:
+          - Id: MediaBucketOrigin
+            DomainName: !GetAtt MediaBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt MediaOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: MediaBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true
+        PriceClass: PriceClass_200
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: enforces TLS globally & grants one CloudFront distribution read access to processed/ only
+        must:
+          - keep explicit deny for non-TLS requests
+          - CloudFront resource remains processed/* and SourceArn-scoped
+        mutable: change-with-constraints
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt MediaBucket.Arn
+              - !Sub '${MediaBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: AllowCloudFrontReadProcessed
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${MediaBucket.Arn}/processed/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${MediaDistribution}'
+
+  AuditLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: AuditLoggingEnabled
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: authorizes only S3 log delivery & CloudTrail writes while enforcing TLS on audit storage
+        must:
+          - service writes remain SourceAccount/SourceArn-scoped
+          - deny non-TLS access
+        mutable: change-with-constraints
+    Properties:
+      Bucket: !Ref AuditLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt AuditLogBucket.Arn
+              - !Sub '${AuditLogBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: AllowS3ServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${AuditLogBucket.Arn}/s3-access/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !GetAtt MediaBucket.Arn
+          - Sid: AllowCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AuditLogBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-s3-data'
+          - Sid: AllowCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${AuditLogBucket.Arn}/cloudtrail/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-s3-data'
+
+  MediaDataTrail:
+    Type: AWS::CloudTrail::Trail
+    Condition: AuditLoggingEnabled
+    DependsOn: AuditLogBucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: optional object-level audit trail for Put/Get/Delete investigation; disabled by default because data events & storage add cost
+        must:
+          - scope data events to the media bucket only
+          - log file validation stays enabled
+        mutable: free-to-tune
+    Properties:
+      TrailName: !Sub '${AWS::StackName}-s3-data'
+      S3BucketName: !Ref AuditLogBucket
+      S3KeyPrefix: cloudtrail
+      EnableLogFileValidation: true
+      IncludeGlobalServiceEvents: false
+      IsLogging: true
+      IsMultiRegionTrail: false
+      EventSelectors:
+        - IncludeManagementEvents: false
+          ReadWriteType: All
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub '${MediaBucket.Arn}/'
+
+Outputs:
+  MediaBucketName:
+    Description: Set as MediaStorage__BucketName for the deployed API.
+    Value: !Ref MediaBucket
+  ImageProcessorFunctionName:
+    Value: !Ref ImageProcessorFunction
+  CloudFrontDistributionId:
+    Value: !Ref MediaDistribution
+  CloudFrontBaseUrl:
+    Description: Set as MediaStorage__CloudFrontBaseUrl for the deployed API.
+    Value: !Sub 'https://${MediaDistribution.DomainName}'
