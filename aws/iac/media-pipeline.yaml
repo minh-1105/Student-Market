@@ -38,6 +38,16 @@ Parameters:
     Default: 0
     MinValue: 0
     MaxValue: 100
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Email subscribed to the alarm SNS topic (confirm the subscription mail once). Empty = topic without subscriber.
+  RawRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 365
+    Description: Days to keep original uploads under raw/ after the WebP variants exist in processed/.
   AbortIncompleteMultipartDays:
     Type: Number
     Default: 7
@@ -58,13 +68,55 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Enables paid S3 request metrics for the whole media bucket.
+  WebAclArn:
+    Type: String
+    Default: ''
+    Description: AWS WAF web ACL (CLOUDFRONT scope, us-east-1) from the edge stack (edge-waf.yaml). Empty = no WAF.
+  ApiOriginDomain:
+    Type: String
+    Default: ''
+    Description: >-
+      API Gateway domain (e.g. abc123.execute-api.ap-southeast-1.amazonaws.com). When set, CloudFront also serves
+      /api/* from the API (no caching) so the API sits behind the WAF.
+  OriginVerifySecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: >-
+      Value of the X-Origin-Verify header CloudFront adds to API requests. The API rejects /api/* calls without it
+      (when OriginVerify__Enforce=true), so the WAF cannot be bypassed by calling API Gateway directly.
 
 Conditions:
+  HasWebAcl: !Not [!Equals [!Ref WebAclArn, '']]
+  HasApiOrigin: !Not [!Equals [!Ref ApiOriginDomain, '']]
   AuditLoggingEnabled: !Equals [!Ref EnableAuditLogging, 'true']
   DetailedS3MetricsEnabled: !Equals [!Ref EnableDetailedS3Metrics, 'true']
   ReserveProcessorConcurrency: !Not [!Equals [!Ref ProcessorReservedConcurrency, '0']]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
 
 Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: single notification target for every alarm of the media and API stacks (API stack imports the ARN via deploy script)
+        mutable: free-to-tune
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-alerts'
+      Tags:
+        - Key: Project
+          Value: StudentMarket
+        - Key: Environment
+          Value: !Ref Environment
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
   AuditLogBucket:
     Type: AWS::S3::Bucket
     Condition: AuditLoggingEnabled
@@ -116,7 +168,7 @@ Resources:
           - BucketOwnerEnforced; no ACLs
           - Block Public Access remains fully enabled
           - notification prefix remains raw/
-          - do not add raw expiry until product retention is approved
+          - raw/ expires after RawRetentionDays (approved 2026-11-16); processed/ never expires
         mutable: change-with-constraints
         mutability:
           VersioningConfiguration: review-required
@@ -151,6 +203,16 @@ Resources:
             Status: Enabled
             NoncurrentVersionExpiration:
               NoncurrentDays: !Ref NoncurrentVersionRetentionDays
+          # Originals are only needed until the Lambda has written processed/ (it retries within 1 hour).
+          # Versioned bucket: expiry adds a delete marker; the noncurrent rule above removes the bytes later.
+          - Id: expire-raw-uploads
+            Status: Enabled
+            Prefix: raw/
+            ExpirationInDays: !Ref RawRetentionDays
+          - Id: remove-expired-raw-delete-markers
+            Status: Enabled
+            Prefix: raw/
+            ExpiredObjectDeleteMarker: true
       LoggingConfiguration: !If
         - AuditLoggingEnabled
         - DestinationBucketName: !Ref AuditLogBucket
@@ -339,6 +401,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: Image processor reported one or more errors in five minutes.
+      AlarmActions: [!Ref AlertTopic]
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -356,6 +419,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: Image processor was throttled in five minutes.
+      AlarmActions: [!Ref AlertTopic]
       Namespace: AWS/Lambda
       MetricName: Throttles
       Dimensions:
@@ -373,6 +437,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: Image processor p99 duration exceeded 80 percent of its timeout.
+      AlarmActions: [!Ref AlertTopic]
       Namespace: AWS/Lambda
       MetricName: Duration
       Dimensions:
@@ -390,6 +455,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: Image processor failure queue contains one or more events.
+      AlarmActions: [!Ref AlertTopic]
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -432,16 +498,42 @@ Resources:
         mutable: change-with-constraints
     Properties:
       DistributionConfig:
-        Comment: !Sub 'Student Market processed images (${Environment})'
+        Comment: !Sub 'Student Market processed images + API (${Environment})'
         Enabled: true
         HttpVersion: http2and3
         IPV6Enabled: true
+        WebACLId: !If [HasWebAcl, !Ref WebAclArn, !Ref AWS::NoValue]
         Origins:
           - Id: MediaBucketOrigin
             DomainName: !GetAtt MediaBucket.RegionalDomainName
             OriginAccessControlId: !GetAtt MediaOriginAccessControl.Id
             S3OriginConfig:
               OriginAccessIdentity: ''
+          - !If
+            - HasApiOrigin
+            - Id: ApiOrigin
+              DomainName: !Ref ApiOriginDomain
+              CustomOriginConfig:
+                OriginProtocolPolicy: https-only
+                OriginSSLProtocols: [TLSv1.2]
+                OriginReadTimeout: 30
+              OriginCustomHeaders:
+                - HeaderName: X-Origin-Verify
+                  HeaderValue: !Ref OriginVerifySecret
+            - !Ref AWS::NoValue
+        CacheBehaviors: !If
+          - HasApiOrigin
+          - - PathPattern: /api/*
+              TargetOriginId: ApiOrigin
+              ViewerProtocolPolicy: https-only
+              AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+              CachedMethods: [GET, HEAD]
+              # Managed-CachingDisabled: API responses are per-user and never cached.
+              CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+              # Managed-AllViewerExceptHostHeader: forwards Authorization, Origin, query strings, cookies.
+              OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+              Compress: false
+          - !Ref AWS::NoValue
         DefaultCacheBehavior:
           TargetOriginId: MediaBucketOrigin
           ViewerProtocolPolicy: redirect-to-https
@@ -547,35 +639,65 @@ Resources:
     DependsOn: AuditLogBucketPolicy
     Metadata:
       com.aws.cloudformation.Context:
-        why: optional object-level audit trail for Put/Get/Delete investigation; disabled by default because data events & storage add cost
+        why: >-
+          account audit trail - management events (who changed IAM / stacks / buckets, all regions incl. global
+          IAM events; first copy is free) + object-level data events for the media bucket
         must:
           - scope data events to the media bucket only
           - log file validation stays enabled
+          - stay the only trail with management events (a second copy is billed)
         mutable: free-to-tune
     Properties:
+      # Name kept for continuity (renaming replaces the trail); it now also records management events.
       TrailName: !Sub '${AWS::StackName}-s3-data'
       S3BucketName: !Ref AuditLogBucket
       S3KeyPrefix: cloudtrail
       EnableLogFileValidation: true
-      IncludeGlobalServiceEvents: false
+      IncludeGlobalServiceEvents: true
       IsLogging: true
-      IsMultiRegionTrail: false
+      IsMultiRegionTrail: true
       EventSelectors:
-        - IncludeManagementEvents: false
+        - IncludeManagementEvents: true
           ReadWriteType: All
           DataResources:
             - Type: AWS::S3::Object
               Values:
                 - !Sub '${MediaBucket.Arn}/'
 
+  # Free: reports resources (S3, IAM roles, SQS, Lambda...) that are shared outside this account.
+  AccessAnalyzer:
+    Type: AWS::AccessAnalyzer::Analyzer
+    Properties:
+      AnalyzerName: !Sub 'student-market-${Environment}-account'
+      Type: ACCOUNT
+      Tags:
+        - Key: Project
+          Value: StudentMarket
+        - Key: Environment
+          Value: !Ref Environment
+
+# Exports are imported by the API stack (api.yaml, parameter MediaStackName). While imported, these
+# values cannot change or be removed; deploy the API stack without the import first if they must.
 Outputs:
   MediaBucketName:
-    Description: Set as MediaStorage__BucketName for the deployed API.
+    Description: Imported by the API stack as MediaStorage__BucketName.
     Value: !Ref MediaBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-MediaBucketName'
   ImageProcessorFunctionName:
     Value: !Ref ImageProcessorFunction
   CloudFrontDistributionId:
     Value: !Ref MediaDistribution
+  CloudFrontDistributionArn:
+    Description: Pass to the edge stack (us-east-1) as DistributionArn for the Free pricing plan.
+    Value: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${MediaDistribution}'
   CloudFrontBaseUrl:
-    Description: Set as MediaStorage__CloudFrontBaseUrl for the deployed API.
+    Description: Imported by the API stack as MediaStorage__CloudFrontBaseUrl. With ApiOriginDomain, the API is at <url>/api.
     Value: !Sub 'https://${MediaDistribution.DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontBaseUrl'
+  AlertTopicArn:
+    Description: SNS topic for alarms; imported by the API stack.
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlertTopicArn'

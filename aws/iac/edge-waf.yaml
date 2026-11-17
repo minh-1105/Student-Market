@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Student Market edge security - AWS WAF web ACL for the media/API CloudFront distribution and the
+  CloudFront flat-rate (Free) pricing plan. MUST be deployed in us-east-1 (CLOUDFRONT scope).
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  DistributionArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ARN of the CloudFront distribution (output CloudFrontDistributionArn of the media stack). Empty = web ACL
+      only. Set it after the web ACL is attached to the distribution to subscribe both to the Free plan.
+  SubscribeFreePlan:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: "'false' keeps pay-as-you-go WAF (about $5 per web ACL + $1 per rule + $0.60 per million requests)."
+  IncludeSqliRule:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Fifth rule. Turn off on pay-as-you-go to keep WAF at 4 rules (about $9 per month).
+  ApiRateLimitPer5Min:
+    Type: Number
+    Default: 500
+    MinValue: 100
+    Description: Max /api/* requests per client IP in any 5-minute window before WAF blocks that IP.
+
+Conditions:
+  HasDistribution: !Not [!Equals [!Ref DistributionArn, '']]
+  CreateSubscription: !And [!Condition HasDistribution, !Equals [!Ref SubscribeFreePlan, 'true']]
+  UseSqliRule: !Equals [!Ref IncludeSqliRule, 'true']
+
+Resources:
+  # Free plan allows 5 rules in total (custom + AWS managed). Keep this list at 5 or fewer.
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub 'student-market-${Environment}-edge'
+      Scope: CLOUDFRONT
+      Description: Student Market - protects images and the API served by CloudFront
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub 'student-market-${Environment}-edge'
+      Rules:
+        # 1. HTTP flood / brute force on the API (login, OTP) per client IP.
+        - Name: api-rate-limit-per-ip
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref ApiRateLimitPer5Min
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    UriPath: {}
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /api/
+                  TextTransformations:
+                    - Priority: 0
+                      Type: NONE
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: api-rate-limit-per-ip
+        # 2. Known malicious IPs (botnets, scanners) from Amazon threat intelligence.
+        - Name: aws-ip-reputation
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-ip-reputation
+        # 3. OWASP-style common protections (XSS, path traversal, bad bots...).
+        - Name: aws-common
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              RuleActionOverrides:
+                # API bodies are small JSON, but a long item description/chat message must not be blocked
+                # just for size; images never pass through CloudFront on upload (direct presigned POST to S3).
+                - Name: SizeRestrictions_BODY
+                  ActionToUse:
+                    Count: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-common
+        # 4. Exploit payloads (Log4j, Java deserialization, localhost Host header...).
+        - Name: aws-known-bad-inputs
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-known-bad-inputs
+        # 5. SQL injection (API talks to PostgreSQL).
+        - !If
+          - UseSqliRule
+          - Name: aws-sqli
+            Priority: 4
+            OverrideAction:
+              None: {}
+            Statement:
+              ManagedRuleGroupStatement:
+                VendorName: AWS
+                Name: AWSManagedRulesSQLiRuleSet
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: aws-sqli
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: StudentMarket
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudFront flat-rate Free plan: $0/month, WAF + DDoS included, 1M requests / 100 GB per month, no overage
+  # charges. The web ACL must already be attached to the distribution. Free plans activate immediately.
+  FreePlanSubscription:
+    Type: AWS::PricingPlanManager::Subscription
+    Condition: CreateSubscription
+    Properties:
+      PlanFamily: CloudFront
+      PlanTier: FREE
+      ResourceArns:
+        - !Ref DistributionArn
+        - !GetAtt WebAcl.Arn
+
+Outputs:
+  WebAclArn:
+    Description: Pass to the media stack as WebAclArn.
+    Value: !GetAtt WebAcl.Arn
+  FreePlanStatus:
+    Condition: CreateSubscription
+    Value: !GetAtt FreePlanSubscription.Status

@@ -2,28 +2,26 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >-
   Student Market API - ASP.NET Core (.NET 8) on Lambda behind an API Gateway HTTP API.
-  Deploy media-pipeline.yaml first and pass its outputs (MediaBucketName, CloudFrontBaseUrl).
+  Deploy media-pipeline.yaml first: this stack imports its exports (bucket, CloudFront URL, SNS topic).
+  Secrets live in SSM Parameter Store (SecureString) under SsmParameterPath, not in this template.
 
 Parameters:
   Environment:
     Type: String
     Default: dev
     AllowedValues: [dev, staging, prod]
-  DbConnectionString:
+  MediaStackName:
     Type: String
-    NoEcho: true
-    Description: Npgsql connection string, e.g. Host=...;Port=5432;Database=...;Username=...;Password=...;SSL Mode=Require
-  JwtSecretKey:
+    Default: student-market-dev-media
+    Description: Media stack whose exports (MediaBucketName, CloudFrontBaseUrl, AlertTopicArn) this stack imports.
+  SsmParameterPath:
     Type: String
-    NoEcho: true
-    MinLength: 32
-    Description: Random secret (>= 32 chars, 64 recommended) used to sign JWTs.
-  MediaBucketName:
-    Type: String
-    Description: Output MediaBucketName of the media-pipeline stack.
-  CloudFrontBaseUrl:
-    Type: String
-    Description: Output CloudFrontBaseUrl of the media-pipeline stack (https://...).
+    Default: /student-market/dev/api
+    AllowedPattern: '^/[A-Za-z0-9_./-]*[A-Za-z0-9_-]$'
+    Description: >-
+      SSM path (no trailing slash) loaded into app configuration at cold start. Each SecureString below it maps to a
+      config key, e.g. <path>/ConnectionStrings/DefaultConnection, <path>/Jwt/SecretKey, <path>/Email/Password,
+      <path>/OriginVerify/Secret. Created by Production/deploy.ps1 from deploy.secrets.env.
   FrontendOrigins:
     Type: String
     Default: http://localhost:3000,http://localhost:5173
@@ -47,12 +45,7 @@ Parameters:
   EmailUsername:
     Type: String
     Default: ''
-    Description: SMTP login (Gmail address). Leave empty to only log emails (OTP) to CloudWatch.
-  EmailPassword:
-    Type: String
-    NoEcho: true
-    Default: ''
-    Description: SMTP password (Gmail App Password, not the account password).
+    Description: SMTP login (Gmail address). Leave empty to only log emails (OTP) to CloudWatch. Password is in SSM.
   EmailFromEmail:
     Type: String
     Default: no-reply@studentfleamarket.local
@@ -68,10 +61,6 @@ Parameters:
   EmailSmtpPort:
     Type: Number
     Default: 587
-  AlertTopicArn:
-    Type: String
-    Default: ''
-    Description: SNS topic for alarm notifications (output AlertTopicArn of the media stack). Empty = alarm without action.
   ApiThrottleBurstLimit:
     Type: Number
     Default: 50
@@ -86,11 +75,17 @@ Parameters:
     Type: String
     Default: ''
     Description: Google OAuth Web client ID used to verify ID tokens on POST /api/Auth/google (public value). Empty = Google sign-in disabled.
+  EnforceOriginVerify:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      'true' rejects /api/* requests without the X-Origin-Verify header that CloudFront adds, so clients must go
+      through CloudFront + WAF. Enable only after the frontend uses the CloudFront API URL.
 
 Conditions:
   UseVpc: !Not [!Equals [!Join ['', !Ref SubnetIds], '']]
   HasSmtpCredentials: !Not [!Equals [!Ref EmailUsername, '']]
-  HasAlertTopic: !Not [!Equals [!Ref AlertTopicArn, '']]
 
 Globals:
   Function:
@@ -123,13 +118,15 @@ Resources:
       Environment:
         Variables:
           ASPNETCORE_ENVIRONMENT: Production
-          ConnectionStrings__DefaultConnection: !Ref DbConnectionString
-          Jwt__SecretKey: !Ref JwtSecretKey
-          MediaStorage__BucketName: !Ref MediaBucketName
+          # Secrets (DB connection string, JWT key, SMTP password, origin-verify secret) come from SSM.
+          SSM_CONFIG_PATH: !Ref SsmParameterPath
+          MediaStorage__BucketName: !ImportValue
+            Fn::Sub: '${MediaStackName}-MediaBucketName'
           MediaStorage__Region: !Ref AWS::Region
           MediaStorage__ServiceUrl: ''
           MediaStorage__ForcePathStyle: 'false'
-          MediaStorage__CloudFrontBaseUrl: !Ref CloudFrontBaseUrl
+          MediaStorage__CloudFrontBaseUrl: !ImportValue
+            Fn::Sub: '${MediaStackName}-CloudFrontBaseUrl'
           Cors__AllowedOrigins: !Ref FrontendOrigins
           SkipDatabaseSeed: !Ref SkipDatabaseSeed
           SkipDemoDataSeed: 'true'
@@ -138,12 +135,12 @@ Resources:
           Email__Port: !Ref EmailSmtpPort
           Email__UseSsl: 'true'
           Email__Username: !Ref EmailUsername
-          Email__Password: !Ref EmailPassword
           Email__FromEmail: !Ref EmailFromEmail
           Email__LogOnly: !If [HasSmtpCredentials, !Ref EmailLogOnly, 'true']
           # Surface SMTP failures as errors instead of silently logging the OTP.
           Email__LogOnFailure: 'false'
           Google__ClientId: !Ref GoogleClientId
+          OriginVerify__Enforce: !Ref EnforceOriginVerify
       Policies:
         # Needed only to create ENIs when attached to a VPC; harmless otherwise.
         - AWSLambdaVPCAccessExecutionRole
@@ -152,12 +149,32 @@ Resources:
             - Sid: CreatePresignedRawImageUploads
               Effect: Allow
               Action: s3:PutObject
-              Resource: !Sub 'arn:${AWS::Partition}:s3:::${MediaBucketName}/raw/*'
+              Resource: !Sub
+                - 'arn:${AWS::Partition}:s3:::${Bucket}/raw/*'
+                - Bucket: !ImportValue
+                    Fn::Sub: '${MediaStackName}-MediaBucketName'
             # HeadObject when confirming an upload before saving ItemImage.
             - Sid: VerifyRawImageUploads
               Effect: Allow
               Action: s3:GetObject
-              Resource: !Sub 'arn:${AWS::Partition}:s3:::${MediaBucketName}/raw/*'
+              Resource: !Sub
+                - 'arn:${AWS::Partition}:s3:::${Bucket}/raw/*'
+                - Bucket: !ImportValue
+                    Fn::Sub: '${MediaStackName}-MediaBucketName'
+            - Sid: ReadOwnConfigFromSsm
+              Effect: Allow
+              Action: ssm:GetParametersByPath
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}'
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}/*'
+            # SecureString values are encrypted with the AWS managed key aws/ssm; decrypt only through SSM.
+            - Sid: DecryptSecureStringsViaSsm
+              Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
       Events:
         Proxy:
           Type: HttpApi
@@ -194,7 +211,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: API Lambda reported errors in five minutes.
-      AlarmActions: !If [HasAlertTopic, [!Ref AlertTopicArn], !Ref AWS::NoValue]
+      AlarmActions:
+        - !ImportValue
+          Fn::Sub: '${MediaStackName}-AlertTopicArn'
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -209,7 +228,9 @@ Resources:
 
 Outputs:
   ApiBaseUrl:
-    Description: Base URL for the frontend (VITE_API_URL / NEXT_PUBLIC_API_URL).
+    Description: API Gateway URL. Pass its host to the media stack as ApiOriginDomain; browsers use <CloudFrontBaseUrl>/api.
     Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
+  ApiOriginDomain:
+    Value: !Sub '${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
   ApiFunctionName:
     Value: !Ref ApiFunction
