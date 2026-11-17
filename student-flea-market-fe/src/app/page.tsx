@@ -1,255 +1,328 @@
+///////////////////////////////////////////////////////////
+//                                                       //
+//               HOME / STOREFRONT PAGE                  //
+//                                                       //
+///////////////////////////////////////////////////////////
+
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import Link from 'next/link';
-import { Search, Calendar, Clock, Bookmark, Layers, BadgeCheck, Activity, ArrowRight } from 'lucide-react';
-import { AppShell } from '@/components/shell/AppShell';
-import { Modal, Avatar } from '@/components/ui';
-import { ItemCard, ItemGrid } from '@/components/items/ItemCard';
-import { ItemDetailModal } from '@/components/items/ItemDetailModal';
-import { itemsApi, favoritesApi, sellerApi, type ItemSummary } from '@/lib/api';
+import { useSearchParams } from 'next/navigation';
+import { Navbar } from '@/components/ui/layout/Navbar';
+import { HeroBanner } from '@/components/ui/home/HeroBanner';
+import { CategoryChips } from '@/components/ui/home/CategoryChips';
+import { ProductCard } from '@/components/ui/home/ProductCard';
+import { ProductItem } from '@/data/mock-items';
+import { ArrowRight, Search, Plus } from 'lucide-react';
+import { AuthPromptModal } from '@/components/ui/auth/AuthPromptModal';
+import { AuthRequiredModal } from '@/components/ui/auth/AuthRequiredModal';
+import { SellerContactModal } from '@/components/ui/home/SellerContactModal';
+import { PostItemModal } from '@/components/ui/home/PostItemModal';
+import { AdPromotionModal } from '@/components/ui/home/AdPromotionModal';
+import { BrandLogo } from '@/components/ui/BrandLogo';
 import { useAuthStore } from '@/lib/auth-store';
-import { formatDate } from '@/lib/format';
-import { useLang, tr } from '@/lib/i18n';
+import { useLanguageStore, DICTIONARY } from '@/lib/language-store';
+import { itemsApi } from '@/lib/items-api';
+import { ItemDetailDto, ItemSearchQuery, ItemSummaryDto } from '@/types/item';
 
-import { useT } from '@/lib/i18n';
-interface ArticleText {
-  title: string;
-  description: string;
-  content: string;
-}
-interface Article {
-  id: number;
-  date: string;
-  readMin: number;
-  image: string;
-  vi: ArticleText;
-  en: ArticleText;
-}
-
-const ARTICLES: Article[] = [
-  {
-    id: 1,
-    date: '2026-01-18',
-    readMin: 5,
-    image: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&w=800&q=80',
-    en: {
-      title: 'A student’s guide to FLea',
-      description: 'Buy, give away, or swap items with fellow students — save money, cut waste and keep things in the campus community.',
-      content:
-        'FLea helps students trade textbooks, dorm essentials and tech at the lowest cost.\n\n1. Find items by category or keyword in the Marketplace.\n2. Save the ones you like to Favorites.\n3. Meet in person, check the item, then pay.\n4. Want to sell? Request seller access — once approved you can post right away.',
-    },
-    vi: {
-    title: 'Cẩm nang dùng FLea cho sinh viên',
-    description: 'Mua, tặng hoặc đổi đồ với bạn cùng trường — tiết kiệm tiền, giảm rác thải và giữ đồ dùng trong cộng đồng.',
-    content:
-      'FLea giúp sinh viên trao đổi giáo trình, đồ dùng phòng trọ và đồ công nghệ với chi phí thấp nhất.\n\n1. Tìm đồ theo danh mục hoặc từ khóa trong Chợ đồ.\n2. Lưu món ưng ý vào Yêu thích để xem lại.\n3. Hẹn gặp trực tiếp, kiểm tra món đồ rồi mới thanh toán.\n4. Muốn bán? Gửi yêu cầu trở thành người bán, khi được duyệt là đăng tin được ngay.',
-    },
-  },
-  {
-    id: 2,
-    date: '2026-01-15',
-    readMin: 4,
-    image: 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=800&q=80',
-    en: {
-      title: 'How to be a trusted seller',
-      description: 'Simple tips to earn great reviews, communicate clearly and finish deals smoothly and safely.',
-      content:
-        'Being honest about condition, posting real photos from several angles and replying fast are the three things that earn great reviews.\n\nMention small flaws (scratches, missing accessories) in the description. Meet in busy places like the dorm lobby or campus gate, and be on time.',
-    },
-    vi: {
-    title: 'Làm sao để trở thành người bán uy tín',
-    description: 'Vài mẹo đơn giản để có đánh giá tốt, trao đổi rõ ràng và hoàn tất giao dịch suôn sẻ, an toàn.',
-    content:
-      'Minh bạch về tình trạng sản phẩm, chụp ảnh thật từ nhiều góc và phản hồi nhanh là ba yếu tố cốt lõi giúp bạn được đánh giá cao.\n\nGhi rõ lỗi nhỏ (trầy xước, thiếu phụ kiện) ngay trong mô tả. Hẹn gặp ở nơi đông người như sảnh KTX hoặc cổng trường, và giữ đúng giờ hẹn.',
-    },
-  },
-  {
-    id: 3,
-    date: '2026-01-10',
-    readMin: 6,
-    image: 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=800&q=80',
-    en: {
-      title: 'Give, swap, reuse: a greener campus',
-      description: 'Students give away and swap items on FLea to extend their life and cut waste every moving season.',
-      content:
-        'At the end of each term, fans, kettles and books get left behind when students move out.\n\nWith free (0 ₫) listings and the “open to swaps” option you can pass on things that still work instead of throwing them away. Just set the price to 0 when posting, or turn on swaps.',
-    },
-    vi: {
-    title: 'Tặng, đổi, tái sử dụng: vì một campus xanh hơn',
-    description: 'Sinh viên đang tặng và đổi đồ trên FLea để kéo dài vòng đời món đồ và giảm rác thải mỗi mùa chuyển trọ.',
-    content:
-      'Cuối mỗi kỳ, rất nhiều quạt điện, ấm đun nước và sách vở bị bỏ lại khi sinh viên chuyển trọ.\n\nVới tin Tặng 0đ và tùy chọn Nhận đổi đồ, bạn có thể trao lại những món còn dùng tốt cho bạn khác thay vì vứt đi. Chỉ cần đặt giá 0đ khi đăng tin, hoặc bật Nhận đổi đồ.',
-    },
-  },
-];
-
-interface Metrics {
-  favorites: number | null;
-  listings: number | null;
-  sellerStatus: string | null;
+function mapItemSummaryToProduct(item: ItemSummaryDto): ProductItem {
+  return {
+    id: item.id,
+    itemCode: item.itemCode,
+    title: item.title,
+    price: item.price === 0 ? '0 VND (Free)' : `${item.price.toLocaleString('vi-VN')} VND`,
+    condition: item.conditionName || (item.condition <= 2 ? 'Like New' : 'Good'),
+    conditionVariant: item.condition <= 2 ? 'emerald' : 'orange',
+    location: item.location,
+    imageUrl:
+      item.primaryImageUrl ||
+      'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=500&auto=format&fit=crop&q=80',
+    category: item.categorySlug,
+  };
 }
 
-export default function DiscoverPage() {
-  const t = useT();
-  const { user, isAuthenticated, isInitialized } = useAuthStore();
-  const lang = useLang((s) => s.lang);
-  const [query, setQuery] = useState('');
-  const [article, setArticle] = useState<Article | null>(null);
-  const [latest, setLatest] = useState<ItemSummary[] | null>(null);
-  const [metrics, setMetrics] = useState<Metrics>({ favorites: null, listings: null, sellerStatus: null });
-  const [openItem, setOpenItem] = useState<string | null>(null);
+function mapDetailToProduct(item: ItemDetailDto): ProductItem {
+  return {
+    id: item.id,
+    itemCode: item.itemCode,
+    title: item.title,
+    price: item.price === 0 ? '0 VND (Free)' : `${item.price.toLocaleString('vi-VN')} VND`,
+    condition: item.conditionName || (item.condition <= 2 ? 'Like New' : 'Good'),
+    conditionVariant: item.condition <= 2 ? 'emerald' : 'orange',
+    location: item.location,
+    imageUrl:
+      (item.images && item.images.length > 0 ? item.images[0].imageUrl : null) ||
+      'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=500&auto=format&fit=crop&q=80',
+    category: item.category?.slug || 'other',
+  };
+}
+
+function HomeContent() {
+  const searchParams = useSearchParams();
+  const searchQuery = searchParams.get('q') || '';
+
+  const { language } = useLanguageStore();
+  const t = DICTIONARY[language];
+
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [selectedProduct, setSelectedProduct] = useState<ProductItem | null>(null);
+  const [isAuthRequiredOpen, setIsAuthRequiredOpen] = useState(false);
+  const [isSellerContactOpen, setIsSellerContactOpen] = useState(false);
+  const [isPostItemOpen, setIsPostItemOpen] = useState(false);
+  const [isPostAdOpen, setIsPostAdOpen] = useState(false);
+
+  // Live Backend items state (No mock data fallback)
+  const [products, setProducts] = useState<ProductItem[]>([]);
+  // Loading is derived: true until the results for the current query have arrived.
+  const itemsQueryKey = `${selectedCategory}|${searchQuery.trim()}`;
+  const [loadedQueryKey, setLoadedQueryKey] = useState<string | null>(null);
+  const isLoadingItems = loadedQueryKey !== itemsQueryKey;
+
+  const { isAuthenticated, initAuth } = useAuthStore();
 
   useEffect(() => {
+    initAuth();
+  }, [initAuth]);
+
+  // Fetch real items from Backend API
+  useEffect(() => {
+    let isCancelled = false;
+    const requestKey = `${selectedCategory}|${searchQuery.trim()}`;
+
+    const query: ItemSearchQuery = {
+      keyword: searchQuery.trim() || undefined,
+      categorySlug: selectedCategory !== 'all' ? selectedCategory : undefined,
+      page: 1,
+      pageSize: 50,
+    };
+
     itemsApi
-      .search({ sortBy: 'newest', pageSize: 4 })
-      .then((r) => setLatest(r.items))
-      .catch(() => setLatest([]));
-  }, []);
-
-  useEffect(() => {
-    if (!isInitialized || !isAuthenticated) return;
-    Promise.allSettled([favoritesApi.list(1, 1), itemsApi.mine({ pageSize: 1 }), sellerApi.status()]).then(([f, m, s]) =>
-      setMetrics({
-        favorites: f.status === 'fulfilled' ? f.value.totalCount : null,
-        listings: m.status === 'fulfilled' ? m.value.totalCount : null,
-        sellerStatus: s.status === 'fulfilled' ? (s.value.canSell ? tr('Đã được duyệt', 'Approved') : s.value.sellerStatusName) : null,
+      .searchItems(query)
+      .then((res) => {
+        if (!isCancelled) {
+          if (res && Array.isArray(res.items)) {
+            const mapped = res.items.map(mapItemSummaryToProduct);
+            setProducts(mapped);
+          } else {
+            setProducts([]);
+          }
+          setLoadedQueryKey(requestKey);
+        }
       })
-    );
-  }, [isInitialized, isAuthenticated]);
+      .catch((err) => {
+        if (!isCancelled) {
+          console.warn('Backend API searchItems error:', err);
+          setProducts([]);
+          setLoadedQueryKey(requestKey);
+        }
+      });
 
-  const articles = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return q ? ARTICLES.filter((a) => `${a[lang].title} ${a[lang].description} ${a[lang].content}`.toLowerCase().includes(q)) : ARTICLES;
-  }, [query, lang]);
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedCategory, searchQuery]);
 
-  const metricCards = [
-    { icon: Bookmark, label: t('Tin đã lưu', 'Saved items'), value: metrics.favorites, unit: t('món', 'items'), href: '/favorites' },
-    { icon: Layers, label: t('Tin của tôi', 'My listings'), value: metrics.listings, unit: t('tin', 'listings'), href: '/my-listings' },
-    { icon: BadgeCheck, label: t('Quyền bán', 'Seller access'), value: metrics.sellerStatus, unit: '', href: '/post-item' },
-    { icon: Activity, label: t('Thành viên từ', 'Member since'), value: user ? formatDate(user.createdAt) : null, unit: '', href: '/my-listings' },
-  ];
+  // Handle newly created item posted from PostItemModal
+  const handleItemCreated = (newItem: ItemDetailDto) => {
+    const product = mapDetailToProduct(newItem);
+    setProducts((prev) => [product, ...prev]);
+  };
+
+  // Handle click on Contact / Exchange button
+  const handleContactExchange = (product: ProductItem) => {
+    setSelectedProduct(product);
+    if (!isAuthenticated) {
+      setIsAuthRequiredOpen(true);
+    } else {
+      setIsSellerContactOpen(true);
+    }
+  };
 
   return (
-    <AppShell>
-      <div className="flex items-center justify-between gap-4 mb-8">
-        <div>
-          <h1 className="font-serif text-4xl font-bold text-neutral-900">{t('Khám phá', 'Discover')}</h1>
-          <p className="text-sm text-neutral-500 mt-1">{t('Câu chuyện, mẹo và hướng dẫn mua, tặng, đổi đồ trên FLea.', 'Stories, tips and guides for buying, giving away and swapping on FLea.')}</p>
-        </div>
-        {isAuthenticated && user ? (
-          <Avatar name={user.fullName} url={user.avatarUrl} size="lg" />
-        ) : (
-          <Link href="/auth" className="btn btn-outline hidden sm:inline-flex">
-            {t('Đăng nhập', 'Sign in')}
-          </Link>
-        )}
-      </div>
+    <div className="min-h-screen bg-[#FCF9F4] dark:bg-stone-950 font-sans flex flex-col selection:bg-[#EFE3D3] selection:text-[#5E412B] transition-colors duration-200">
 
-      <div role="search" className="relative mb-8">
-        <label htmlFor="blog-search" className="sr-only">
-          {t('Tìm bài viết', 'Search articles')}
-        </label>
-        <Search className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none" aria-hidden="true" />
-        <input
-          id="blog-search"
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t('Tìm bài viết, mẹo hoặc chủ đề (vd: đổi đồ, uy tín, người bán)...', 'Search articles, tips or topics (e.g. swap, trust, seller)...')}
-          className="field !rounded-full pl-12 py-3.5"
+      {/* 1. Global Navigation Bar */}
+      <Navbar onPostAdClick={() => setIsPostAdOpen(true)} />
+
+      {/* Welcome Auth Prompt Modal for guests upon first visit */}
+      <AuthPromptModal />
+
+      {/* Modal requiring login when guest clicks Contact / Exchange */}
+      <AuthRequiredModal
+        isOpen={isAuthRequiredOpen}
+        onClose={() => setIsAuthRequiredOpen(false)}
+        product={selectedProduct}
+      />
+
+      {/* Seller Contact Modal when authenticated user clicks Contact / Exchange */}
+      <SellerContactModal
+        isOpen={isSellerContactOpen}
+        onClose={() => setIsSellerContactOpen(false)}
+        product={selectedProduct}
+      />
+
+      {/* Post an Item Modal (Hoàn toàn MIỄN PHÍ cho sinh viên) */}
+      <PostItemModal
+        isOpen={isPostItemOpen}
+        onClose={() => setIsPostItemOpen(false)}
+        onItemCreated={handleItemCreated}
+      />
+
+      {/* Post Ad Modal (Dịch vụ Đẩy tin bán gấp - TÍNH PHÍ 5k, 15k, 25k) */}
+      <AdPromotionModal
+        isOpen={isPostAdOpen}
+        onClose={() => setIsPostAdOpen(false)}
+        userItems={products}
+        onOpenPostItem={() => {
+          setIsPostAdOpen(false);
+          setIsPostItemOpen(true);
+        }}
+      />
+
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+        {/* 2. Hero Banner */}
+        <HeroBanner onPostItemClick={() => setIsPostItemOpen(true)} />
+
+        {/* 3. Category Filter Chips */}
+        <CategoryChips
+          activeCategory={selectedCategory}
+          onSelectCategory={setSelectedCategory}
         />
-      </div>
 
-      {articles.length ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-8">
-          {articles.map((a) => (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => setArticle(a)}
-              className="article-card text-left bg-[#f0f0f0] rounded-3xl overflow-hidden border border-white/80 cursor-pointer group flex flex-col"
+        {/* Search Results Notice Banner if search query is active */}
+        {searchQuery.trim() && (
+          <div className="flex items-center justify-between p-3.5 sm:p-4 rounded-2xl bg-[#FAF7F2] dark:bg-stone-900 border border-[#EADBCE] dark:border-stone-800 text-[#2A211B] dark:text-stone-100 shadow-2xs animate-in fade-in duration-200">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-[#DFC8AC] text-[#4A3525] flex items-center justify-center shrink-0 shadow-xs">
+                <Search className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="text-xs sm:text-sm font-medium">
+                  {t.home.searchingFor} <span className="font-bold text-[#2A211B] dark:text-stone-100">&ldquo;{searchQuery}&rdquo;</span>
+                </p>
+                <p className="text-[11px] text-[#7A6D63] dark:text-stone-400">
+                  {products.length} {t.home.matchingFound}
+                </p>
+              </div>
+            </div>
+            <Link
+              href="/"
+              className="text-xs font-semibold text-[#8C532B] dark:text-[#F5A764] hover:text-[#6D3D1E] bg-white dark:bg-stone-800 hover:bg-amber-50/50 border border-[#EADBCE] dark:border-stone-700 px-3 py-1.5 rounded-xl transition cursor-pointer"
             >
-              <div className="h-44 overflow-hidden bg-neutral-200">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={a.image} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
-              </div>
-              <div className="p-5 flex-1">
-                <h2 className="font-serif text-xl font-bold text-neutral-900 mb-2 leading-snug">{a[lang].title}</h2>
-                <p className="text-xs text-neutral-600 line-clamp-3 leading-relaxed">{a[lang].description}</p>
-              </div>
-              <div className="px-5 pb-5 pt-3 flex items-center justify-between text-[11px] text-neutral-500 border-t border-neutral-100">
-                <span className="flex items-center gap-1.5">
-                  <Calendar className="w-3.5 h-3.5" aria-hidden="true" /> {formatDate(a.date)}
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5" aria-hidden="true" /> {t(`${a.readMin} phút đọc`, `${a.readMin} min read`)}
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <p className="py-12 text-center text-sm text-neutral-500 mb-8">{t('Không có bài viết phù hợp.', 'No matching articles.')}</p>
-      )}
-
-      {/* Quick metrics (real data when signed in) */}
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-10">
-        {metricCards.map(({ icon: Icon, label, value, unit, href }) => (
-          <Link key={label} href={isAuthenticated ? href : '/auth'} className="metric-card p-5 rounded-2xl bg-white/70 border border-white shadow-sm">
-            <span className="flex items-center gap-2 text-xs font-semibold text-neutral-600">
-              <Icon className="w-4 h-4" aria-hidden="true" /> {label}
-            </span>
-            <p className="text-xl font-bold text-neutral-900 mt-2 tabular truncate">
-              {!isAuthenticated ? '—' : value === null ? '…' : `${value}${unit ? ` ${unit}` : ''}`}
-            </p>
-            <p className="text-[11px] text-neutral-400 mt-0.5">{isAuthenticated ? t('Xem chi tiết', 'View details') : t('Đăng nhập để xem', 'Sign in to view')}</p>
-          </Link>
-        ))}
-      </div>
-
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-bold text-neutral-900">{t('Mới đăng trên chợ', 'New on the marketplace')}</h2>
-        <Link href="/marketplace" className="text-sm font-semibold text-neutral-900 inline-flex items-center gap-1 group">
-          {t('Xem tất cả', 'See all')} <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" aria-hidden="true" />
-        </Link>
-      </div>
-      {latest === null ? (
-        <p className="text-sm text-neutral-500">{t('Đang tải...', 'Loading...')}</p>
-      ) : latest.length === 0 ? (
-        <p className="text-sm text-neutral-500 py-8 text-center rounded-3xl bg-white/60 border border-dashed border-neutral-300">
-          {t('Chợ chưa có tin nào. Hãy là người đầu tiên', 'No listings yet. Be the first to')}{' '}
-          <Link href="/post-item" className="font-semibold text-neutral-900 underline">
-            {t('đăng tin', 'post one')}
-          </Link>
-          .
-        </p>
-      ) : (
-        <ItemGrid>
-          {latest.map((it) => (
-            <ItemCard key={it.id} item={it} onOpen={(i) => setOpenItem(i.id)} />
-          ))}
-        </ItemGrid>
-      )}
-
-      <Modal open={!!article} onClose={() => setArticle(null)} title={article ? article[lang].title : ''} size="lg">
-        {article && (
-          <>
-            <p className="flex gap-3 text-xs text-neutral-500 mb-6">
-              <span>{formatDate(article.date)}</span>
-              <span aria-hidden="true">•</span>
-              <span>{t(`${article.readMin} phút đọc`, `${article.readMin} min read`)}</span>
-            </p>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={article.image} alt="" className="w-full h-64 object-cover rounded-2xl mb-6" />
-            <p className="text-neutral-700 leading-relaxed text-sm whitespace-pre-line mb-6">{article[lang].content}</p>
-            <button type="button" onClick={() => setArticle(null)} className="btn btn-primary w-full">
-              {t('Đóng bài viết', 'Close article')}
-            </button>
-          </>
+              {t.home.clearFilter}
+            </Link>
+          </div>
         )}
-      </Modal>
-      <ItemDetailModal itemId={openItem} onClose={() => setOpenItem(null)} />
-    </AppShell>
+
+        {/* 4. Products Grid Section Header */}
+        <div className="flex items-center justify-between pt-2">
+          <div className="flex items-center gap-2">
+            <h2 className="font-serif text-xl sm:text-2xl font-bold text-[#2A211B] dark:text-stone-100 tracking-tight">
+              {searchQuery.trim() ? t.home.searchResultsTitle : t.home.recentTitle}
+            </h2>
+            <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-[#FAF7F2] dark:bg-stone-900 text-[#8C532B] dark:text-[#F5A764] border border-[#EADBCE] dark:border-stone-700">
+              {products.length} {t.home.itemsCount}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Quick Post Button */}
+            <button
+              type="button"
+              onClick={() => setIsPostItemOpen(true)}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F5ECE0] dark:bg-stone-800 hover:bg-[#EADBC8] dark:hover:bg-stone-700 text-[#6B482C] dark:text-[#E5C9A8] border border-[#DECCB5] dark:border-stone-700 text-xs font-semibold transition cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 text-[#855A3C] dark:text-[#E5C9A8]" />
+              <span>{language === 'vi' ? 'Đăng món đồ mới' : 'Post New Item'}</span>
+            </button>
+
+            <button
+              type="button"
+              className="text-xs font-semibold text-[#A8744F] dark:text-[#F5A764] hover:text-[#7A4924] flex items-center gap-1 group cursor-pointer"
+            >
+              <span>{t.home.seeAll}</span>
+              <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+            </button>
+          </div>
+        </div>
+
+        {/* 5. Responsive Product Grid (2 cols mobile, 3-4 cols tablet, 6 cols desktop) */}
+        {isLoadingItems ? (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
+            {Array.from({ length: 6 }).map((_, idx) => (
+              <div
+                key={idx}
+                className="bg-white dark:bg-stone-900 rounded-2xl border border-slate-100 dark:border-stone-800 p-3 shadow-2xs animate-pulse flex flex-col justify-between h-64"
+              >
+                <div className="w-full aspect-square rounded-xl bg-slate-100 dark:bg-stone-800 mb-3" />
+                <div className="space-y-2">
+                  <div className="w-3/4 h-3 rounded-md bg-slate-200 dark:bg-stone-700" />
+                  <div className="w-1/2 h-3 rounded-md bg-slate-200 dark:bg-stone-700" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
+            {products.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                onContact={handleContactExchange}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Empty state when filter or search has no items */}
+        {!isLoadingItems && products.length === 0 && (
+          <div className="w-full py-16 text-center bg-white dark:bg-stone-900 rounded-2xl border border-dashed border-slate-200 dark:border-stone-700 flex flex-col items-center">
+            <p className="text-sm text-slate-700 dark:text-stone-200 font-semibold mb-1">
+              {t.home.emptyTitle}
+            </p>
+            <p className="text-xs text-slate-500 dark:text-stone-400 mb-4">
+              {t.home.emptySubtitle}
+            </p>
+            <button
+              type="button"
+              onClick={() => setIsPostItemOpen(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#DFC9AE] hover:bg-[#D2B796] text-[#2A211B] border border-[#CEB290] text-xs font-semibold shadow-2xs transition cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>{language === 'vi' ? 'Đăng món đồ đầu tiên' : 'Post First Item'}</span>
+            </button>
+          </div>
+        )}
+
+      </main>
+
+      {/* Modern Compact Footer */}
+      <footer className="mt-16 border-t border-slate-200 dark:border-stone-800 bg-white dark:bg-stone-950 py-8 text-xs text-slate-500 dark:text-stone-400 transition-colors">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex flex-col sm:flex-row items-center gap-3 text-center sm:text-left">
+            <BrandLogo variant="compact" size="sm" />
+            <span className="hidden sm:inline text-slate-300 dark:text-stone-700">|</span>
+            <p>© 2026 Student Flea Market. {t.home.footerDesc}</p>
+          </div>
+          <p className="text-[11px] text-slate-400 dark:text-stone-500">
+            {language === 'vi'
+              ? 'Điều khoản & Chính sách được quản lý tại mục Cài đặt'
+              : 'Terms & Policies are available in Settings'}
+          </p>
+        </div>
+      </footer>
+
+    </div>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-50/60" />}>
+      <HomeContent />
+    </Suspense>
   );
 }

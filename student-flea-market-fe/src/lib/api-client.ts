@@ -7,9 +7,7 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { AuthResultDto, RefreshTokenRequestDto } from '@/types/auth';
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ||
-  (process.env.NODE_ENV === 'development' ? 'http://localhost:5033/api' : '/api');
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5033/api';
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -19,8 +17,7 @@ export const apiClient = axios.create({
   timeout: 15000,
 });
 
-// Helper functions for auth storage. Server-managed HttpOnly cookies must be
-// created by the API, never by browser JavaScript.
+// Helper functions for auth storage (localStorage + cookies)
 export const getStoredAccessToken = (): string | null => {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem('sfm_access_token');
@@ -37,6 +34,10 @@ export const setStoredAuth = (authData: AuthResultDto) => {
   localStorage.setItem('sfm_refresh_token', authData.refreshToken);
   localStorage.setItem('sfm_user', JSON.stringify(authData.user));
 
+  // Set cookie for Next.js Middleware or SSR reading
+  const maxAge = 7 * 24 * 60 * 60; // 7 days
+  document.cookie = `sfm_access_token=${authData.accessToken}; path=/; max-age=${maxAge}; SameSite=Lax`;
+  document.cookie = `sfm_user_role=${authData.user.roleName}; path=/; max-age=${maxAge}; SameSite=Lax`;
 };
 
 export const clearStoredAuth = () => {
@@ -44,6 +45,9 @@ export const clearStoredAuth = () => {
   localStorage.removeItem('sfm_access_token');
   localStorage.removeItem('sfm_refresh_token');
   localStorage.removeItem('sfm_user');
+
+  document.cookie = 'sfm_access_token=; path=/; max-age=0; SameSite=Lax';
+  document.cookie = 'sfm_user_role=; path=/; max-age=0; SameSite=Lax';
 };
 
 // Request Interceptor: Attach Access Token
@@ -131,13 +135,8 @@ apiClient.interceptors.response.use(
       } catch (refreshErr) {
         processQueue(refreshErr, null);
         clearStoredAuth();
-        if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/auth')) {
-          window.location.replace(
-            new URL(
-              `/auth?redirect=${encodeURIComponent(window.location.pathname)}`,
-              window.location.origin
-            )
-          );
+        if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+          window.location.href = `/login?redirect=${encodeURIComponent(window.location.pathname)}`;
         }
         return Promise.reject(refreshErr);
       } finally {
