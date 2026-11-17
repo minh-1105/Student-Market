@@ -542,3 +542,6 @@ account.txt
 
 # Third-party LocalStack source clone (has its own .git), not project code
 /localstack/
+
+# Google OAuth client secret downloads (never commit)
+client_secret_*.json

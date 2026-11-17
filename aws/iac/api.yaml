@@ -68,10 +68,29 @@ Parameters:
   EmailSmtpPort:
     Type: Number
     Default: 587
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    Description: SNS topic for alarm notifications (output AlertTopicArn of the media stack). Empty = alarm without action.
+  ApiThrottleBurstLimit:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    Description: HTTP API burst limit (requests) for all routes. Caps cost and Lambda concurrency usage under spam.
+  ApiThrottleRateLimit:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    Description: HTTP API steady-state limit (requests per second) for all routes.
+  GoogleClientId:
+    Type: String
+    Default: ''
+    Description: Google OAuth Web client ID used to verify ID tokens on POST /api/Auth/google (public value). Empty = Google sign-in disabled.
 
 Conditions:
   UseVpc: !Not [!Equals [!Join ['', !Ref SubnetIds], '']]
   HasSmtpCredentials: !Not [!Equals [!Ref EmailUsername, '']]
+  HasAlertTopic: !Not [!Equals [!Ref AlertTopicArn, '']]
 
 Globals:
   Function:
@@ -124,6 +143,7 @@ Resources:
           Email__LogOnly: !If [HasSmtpCredentials, !Ref EmailLogOnly, 'true']
           # Surface SMTP failures as errors instead of silently logging the OTP.
           Email__LogOnFailure: 'false'
+          Google__ClientId: !Ref GoogleClientId
       Policies:
         # Needed only to create ENIs when attached to a VPC; harmless otherwise.
         - AWSLambdaVPCAccessExecutionRole
@@ -157,6 +177,10 @@ Resources:
     Properties:
       StageName: $default
       # CORS is handled by the ASP.NET Core app (Cors__AllowedOrigins).
+      # Throttled requests get 429 from API Gateway and never invoke (or bill) the Lambda.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: !Ref ApiThrottleBurstLimit
+        ThrottlingRateLimit: !Ref ApiThrottleRateLimit
 
   ApiLogGroup:
     Type: AWS::Logs::LogGroup
@@ -170,6 +194,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmDescription: API Lambda reported errors in five minutes.
+      AlarmActions: !If [HasAlertTopic, [!Ref AlertTopicArn], !Ref AWS::NoValue]
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
